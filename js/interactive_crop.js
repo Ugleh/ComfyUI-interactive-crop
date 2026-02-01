@@ -38,6 +38,48 @@ function cursorForHandle(handle) {
   }
 }
 
+function wrapTextLines(ctx, text, maxWidth) {
+  const raw = String(text ?? "").trim();
+  if (!raw) return [];
+
+  // Keep explicit newlines if present.
+  const paragraphs = raw.split(/\r?\n/);
+  const lines = [];
+
+  for (const p of paragraphs) {
+    const words = p.split(/\s+/).filter(Boolean);
+    let cur = "";
+    for (const w of words) {
+      const test = cur ? `${cur} ${w}` : w;
+      if (ctx.measureText(test).width <= maxWidth) {
+        cur = test;
+        continue;
+      }
+      if (cur) lines.push(cur);
+
+      // If a single word is too long, hard-break it.
+      if (ctx.measureText(w).width > maxWidth) {
+        let chunk = "";
+        for (const ch of w) {
+          const t = chunk + ch;
+          if (ctx.measureText(t).width <= maxWidth) {
+            chunk = t;
+          } else {
+            if (chunk) lines.push(chunk);
+            chunk = ch;
+          }
+        }
+        cur = chunk;
+      } else {
+        cur = w;
+      }
+    }
+    if (cur) lines.push(cur);
+  }
+
+  return lines;
+}
+
 async function postDecision({ prompt_id, node_id, action, rect }) {
   const body = new FormData();
   body.append("prompt_id", prompt_id);
@@ -436,16 +478,31 @@ function attachInlineHandlers(node) {
       ctx.restore();
     }
 
-    // Instruction text
+    // Instruction text (wrapped + clipped to node bounds)
+    const msg = "Drag in the preview to select a crop area. Drag handles to resize; drag inside the box to move.";
+    const textPaddingTop = 10;
+    const lineH = 14;
+    const textMaxW = Math.max(10, w);
+
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, this.size[0], this.size[1]);
+    ctx.clip();
+
     ctx.font = "12px sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.85)";
     ctx.textAlign = "center";
-    const msg = "Drag in the preview to select a crop. Drag handles to resize; drag inside to move.";
-    ctx.fillText(msg, drawX + drawW / 2, drawY + drawH + 14);
+    ctx.textBaseline = "alphabetic";
+
+    const lines = wrapTextLines(ctx, msg, textMaxW);
+    const baseY = drawY + drawH + textPaddingTop + lineH;
+    const cx = x + w / 2;
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], cx, baseY + i * lineH);
+    }
     ctx.restore();
 
-    const neededH = drawY + drawH + 28;
+    const neededH = drawY + drawH + textPaddingTop + lines.length * lineH + 10;
     if (this.size[1] < neededH) this.size[1] = neededH;
   };
 
