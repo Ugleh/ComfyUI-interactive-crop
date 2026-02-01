@@ -129,8 +129,26 @@ function setWidgetDisabled(widget, disabled) {
 }
 
 function calcWidgetAreaY(node) {
-  const count = node.widgets?.length ?? 0;
-  return 30 + count * 22 + 6;
+  // Try to place content below the actual rendered widget stack.
+  // In LiteGraph, widgets often have a `y` assigned during layout.
+  const widgets = node?.widgets ?? [];
+  let maxWidgetY = -1;
+  for (const w of widgets) {
+    const wy = Number(w?.y);
+    if (Number.isFinite(wy)) maxWidgetY = Math.max(maxWidgetY, wy);
+  }
+
+  const titleH = Number(globalThis?.LiteGraph?.NODE_TITLE_HEIGHT ?? 30);
+  const widgetH = Number(globalThis?.LiteGraph?.NODE_WIDGET_HEIGHT ?? 20);
+  const pad = 10;
+
+  // If we have concrete widget y positions, use them.
+  if (maxWidgetY >= 0) return maxWidgetY + widgetH + pad;
+
+  // Fallback estimate.
+  const count = widgets.length;
+  const spacing = 4;
+  return titleH + count * (widgetH + spacing) + pad;
 }
 
 // -------------------------
@@ -262,7 +280,7 @@ function clampRectToBox(rect, boxW, boxH, minSize = 2) {
 }
 
 function applyResize(rect, handle, curX, curY, boxW, boxH, forceRatio, imgW, imgH) {
-  // curX/curY are in local drawBox coords.
+  // curX/curY are in the same coordinate space as rect (we use image pixels).
   const minSize = 2;
   const r0 = normalizeRect(rect);
   const left = r0.x;
@@ -341,10 +359,10 @@ function ensureButtons(node) {
       return;
     }
 
-    const x0 = Math.round(st.rect.x / st.scale);
-    const y0 = Math.round(st.rect.y / st.scale);
-    const x1 = Math.round((st.rect.x + st.rect.w) / st.scale);
-    const y1 = Math.round((st.rect.y + st.rect.h) / st.scale);
+    const x0 = Math.round(st.rect.x);
+    const y0 = Math.round(st.rect.y);
+    const x1 = Math.round(st.rect.x + st.rect.w);
+    const y1 = Math.round(st.rect.y + st.rect.h);
 
     await postDecision({
       prompt_id: st.prompt_id,
@@ -352,6 +370,36 @@ function ensureButtons(node) {
       action: "continue",
       rect: { x0, y0, x1, y1 },
     });
+
+    // Replace the preview with the cropped result for user confirmation.
+    // This is a purely client-side crop of the preview image (server crop still happens).
+    try {
+      const cw = Math.max(1, x1 - x0);
+      const ch = Math.max(1, y1 - y0);
+      const c = document.createElement("canvas");
+      c.width = cw;
+      c.height = ch;
+      const cctx = c.getContext("2d");
+      if (cctx && st.img) {
+        cctx.imageSmoothingEnabled = false;
+        cctx.drawImage(st.img, x0, y0, cw, ch, 0, 0, cw, ch);
+        const url = c.toDataURL("image/png");
+        const img2 = new Image();
+        img2.onload = () => {
+          st.img = img2;
+          st.imgW = img2.width;
+          st.imgH = img2.height;
+          st.rect = null;
+          st.dragging = false;
+          st.dragMode = null;
+          st.resizeHandle = null;
+          st.resizeStartRect = null;
+          st.__cursor = "";
+          node.setDirtyCanvas(true, true);
+        };
+        img2.src = url;
+      }
+    } catch {}
 
     st.sessionActive = false;
     node.setDirtyCanvas(true, true);
@@ -411,7 +459,9 @@ function attachInlineHandlers(node) {
     const y = contentTop;
     const w = this.size[0] - padding * 2;
 
-    const maxH = 220;
+    // Allow user resizing to control preview height (do NOT auto-resize node).
+    // Reserve a little room for instruction text below the image.
+    const maxH = clamp((this.size[1] ?? 0) - y - 48, 20, 2000);
     const imgAR = st.imgW / st.imgH;
     let drawW = w;
     let drawH = Math.round(drawW / imgAR);
@@ -440,10 +490,17 @@ function attachInlineHandlers(node) {
 
     // selection overlay (dim outside, keep inside visible)
     if (st.rect) {
-      const rx = drawX + st.rect.x;
-      const ry = drawY + st.rect.y;
-      const rw = st.rect.w;
-      const rh = st.rect.h;
+      const rectDraw = {
+        x: st.rect.x * st.scale,
+        y: st.rect.y * st.scale,
+        w: st.rect.w * st.scale,
+        h: st.rect.h * st.scale,
+      };
+
+      const rx = drawX + rectDraw.x;
+      const ry = drawY + rectDraw.y;
+      const rw = rectDraw.w;
+      const rh = rectDraw.h;
 
       ctx.save();
       ctx.fillStyle = "rgba(0,0,0,0.45)";
@@ -468,7 +525,7 @@ function attachInlineHandlers(node) {
       ctx.fillStyle = "rgba(255,255,255,0.95)";
       ctx.strokeStyle = "rgba(0,0,0,0.55)";
       ctx.lineWidth = 1;
-      for (const h of getRectHandles(st.rect)) {
+      for (const h of getRectHandles(rectDraw)) {
         const hx = drawX + h.x;
         const hy = drawY + h.y;
         const s = HANDLE_HALF;
@@ -502,8 +559,7 @@ function attachInlineHandlers(node) {
     }
     ctx.restore();
 
-    const neededH = drawY + drawH + textPaddingTop + lines.length * lineH + 10;
-    if (this.size[1] < neededH) this.size[1] = neededH;
+    // Do not change node size here; keep all drawing clipped to node bounds.
   };
 
   const origMouseDown = node.onMouseDown;
@@ -526,14 +582,23 @@ function attachInlineHandlers(node) {
     const localX = clamp(lx - box.x, 0, box.w);
     const localY = clamp(ly - box.y, 0, box.h);
 
+    const imgX = localX / (st.scale || 1);
+    const imgY = localY / (st.scale || 1);
+
     // If clicking a handle => resize
     if (st.rect) {
-      const handle = hitTestHandle(localX, localY, st.rect);
+      const rectDraw = {
+        x: st.rect.x * st.scale,
+        y: st.rect.y * st.scale,
+        w: st.rect.w * st.scale,
+        h: st.rect.h * st.scale,
+      };
+      const handle = hitTestHandle(localX, localY, rectDraw);
       if (handle) {
         st.dragging = true;
         st.dragMode = "resize";
         st.resizeHandle = handle;
-        st.resizeStartRect = { ...st.rect };
+        st.resizeStartRect = { ...st.rect }; // image coords
 
         const cur = cursorForHandle(handle);
         if (cur) setCanvasCursor(graphcanvas, cur);
@@ -546,18 +611,24 @@ function attachInlineHandlers(node) {
 
     // If clicking inside existing rect => move
     if (st.rect) {
+      const rectDraw = {
+        x: st.rect.x * st.scale,
+        y: st.rect.y * st.scale,
+        w: st.rect.w * st.scale,
+        h: st.rect.h * st.scale,
+      };
       const inside =
-        localX >= st.rect.x &&
-        localX <= st.rect.x + st.rect.w &&
-        localY >= st.rect.y &&
-        localY <= st.rect.y + st.rect.h;
+        localX >= rectDraw.x &&
+        localX <= rectDraw.x + rectDraw.w &&
+        localY >= rectDraw.y &&
+        localY <= rectDraw.y + rectDraw.h;
 
       if (inside) {
         st.dragging = true;
         st.dragMode = "move";
         st.resizeHandle = null;
-        st.moveOffsetX = localX - st.rect.x;
-        st.moveOffsetY = localY - st.rect.y;
+        st.moveOffsetX = imgX - st.rect.x;
+        st.moveOffsetY = imgY - st.rect.y;
 
         setCanvasCursor(graphcanvas, "move");
 
@@ -571,9 +642,9 @@ function attachInlineHandlers(node) {
     st.dragging = true;
     st.dragMode = "new";
     st.resizeHandle = null;
-    st.startX = localX;
-    st.startY = localY;
-    st.rect = { x: st.startX, y: st.startY, w: 0, h: 0 };
+    st.startX = imgX;
+    st.startY = imgY;
+    st.rect = { x: st.startX, y: st.startY, w: 0, h: 0 }; // image coords
 
     ACTIVE_DRAG_NODE = this;
     this.setDirtyCanvas(true, true);
@@ -604,15 +675,21 @@ function attachInlineHandlers(node) {
             desired = st.forceOriginalRatio ? "crosshair" : "crosshair";
           }
         } else if (st.rect) {
-          const handle = hitTestHandle(localX, localY, st.rect);
+          const rectDraw = {
+            x: st.rect.x * st.scale,
+            y: st.rect.y * st.scale,
+            w: st.rect.w * st.scale,
+            h: st.rect.h * st.scale,
+          };
+          const handle = hitTestHandle(localX, localY, rectDraw);
           if (handle) {
             desired = cursorForHandle(handle) || desired;
           } else {
             const inside =
-              localX >= st.rect.x &&
-              localX <= st.rect.x + st.rect.w &&
-              localY >= st.rect.y &&
-              localY <= st.rect.y + st.rect.h;
+              localX >= rectDraw.x &&
+              localX <= rectDraw.x + rectDraw.w &&
+              localY >= rectDraw.y &&
+              localY <= rectDraw.y + rectDraw.h;
             desired = inside ? "move" : "crosshair";
           }
         } else {
@@ -661,9 +738,12 @@ function attachInlineHandlers(node) {
     const localX0 = clamp(pos[0] - box.x, 0, box.w);
     const localY0 = clamp(pos[1] - box.y, 0, box.h);
 
+    const imgX0 = localX0 / (st.scale || 1);
+    const imgY0 = localY0 / (st.scale || 1);
+
     if (st.dragMode === "move" && st.rect) {
-      const newX = clamp(localX0 - st.moveOffsetX, 0, box.w - st.rect.w);
-      const newY = clamp(localY0 - st.moveOffsetY, 0, box.h - st.rect.h);
+      const newX = clamp(imgX0 - st.moveOffsetX, 0, st.imgW - st.rect.w);
+      const newY = clamp(imgY0 - st.moveOffsetY, 0, st.imgH - st.rect.h);
       st.rect = { ...st.rect, x: newX, y: newY };
       this.setDirtyCanvas(true, true);
       return true;
@@ -671,18 +751,28 @@ function attachInlineHandlers(node) {
 
     if (st.dragMode === "resize" && st.rect && st.resizeHandle) {
       const baseRect = st.resizeStartRect ? st.resizeStartRect : st.rect;
-      st.rect = applyResize(baseRect, st.resizeHandle, localX0, localY0, box.w, box.h, !!st.forceOriginalRatio, st.imgW, st.imgH);
+      st.rect = applyResize(
+        baseRect,
+        st.resizeHandle,
+        imgX0,
+        imgY0,
+        st.imgW,
+        st.imgH,
+        !!st.forceOriginalRatio,
+        st.imgW,
+        st.imgH
+      );
       this.setDirtyCanvas(true, true);
       return true;
     }
 
     // dragMode === "new"
-    let endX = localX0;
-    let endY = localY0;
+    let endX = imgX0;
+    let endY = imgY0;
 
     if (st.forceOriginalRatio) {
       const ratio = st.imgW / st.imgH;
-      const out = enforceAspectRect(st.startX, st.startY, localX0, localY0, ratio, box.w, box.h);
+      const out = enforceAspectRect(st.startX, st.startY, imgX0, imgY0, ratio, st.imgW, st.imgH);
       endX = out.endX;
       endY = out.endY;
     }
@@ -704,6 +794,7 @@ function attachInlineHandlers(node) {
       st.dragging = false;
       st.dragMode = null;
       st.resizeHandle = null;
+      st.resizeStartRect = null;
       ACTIVE_DRAG_NODE = null;
       this.setDirtyCanvas(true, true);
       setCanvasCursor(graphcanvas, st.__cursor || "");
