@@ -1,5 +1,7 @@
 # Interactive Crop for ComfyUI
 
+![preview image of node, showing how it looks](https://raw.githubusercontent.com/Ugleh/ComfyUI-interactive-crop/refs/heads/main/preview.png?raw=true)
+
 An **interactive, run-pausing** crop node for ComfyUI.
 
 Unlike most crop nodes (which crop from numeric inputs), this node lets you **draw the selection during the prompt run** and then choose what to do:
