@@ -1,6 +1,7 @@
 import os
 import uuid
 import threading
+import json
 from typing import Dict, Tuple, Any
 
 import torch
@@ -16,6 +17,63 @@ TIMEOUT_SECONDS = 6 * 60 * 60  # 6 hours
 
 _LOCK = threading.Lock()
 _WAITERS: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+
+def _extract_workflow(extra_pnginfo: Any) -> Any:
+    if not isinstance(extra_pnginfo, dict):
+        return None
+
+    wf = extra_pnginfo.get("workflow") or extra_pnginfo.get("Workflow")
+    if wf is None:
+        return None
+
+    if isinstance(wf, str):
+        try:
+            return json.loads(wf)
+        except Exception:
+            return None
+
+    if isinstance(wf, dict):
+        return wf
+
+    return None
+
+
+def _is_node_bypassed(node_id: str, *, extra_pnginfo: Any = None, prompt: Any = None) -> bool:
+    node_id = str(node_id)
+
+    wf = _extract_workflow(extra_pnginfo)
+    nodes = None
+    if isinstance(wf, dict):
+        nodes = wf.get("nodes")
+    if isinstance(nodes, list):
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            if str(n.get("id")) != node_id:
+                continue
+
+            # ComfyUI/LiteGraph modes vary by version; commonly:
+            # - 0: enabled
+            # - 2: never/muted
+            # - 4: bypass
+            mode = n.get("mode", None)
+            try:
+                mode_i = int(mode)
+            except Exception:
+                mode_i = None
+
+            if n.get("bypassed") is True or n.get("bypass") is True:
+                return True
+            if mode_i in (2, 4):
+                return True
+
+            return False
+
+    # Some ComfyUI builds only include prompt graph here (no workflow modes).
+    # If we can't prove bypass, assume not bypassed.
+    _ = prompt
+    return False
 
 
 def _to_pil(img_tensor: torch.Tensor) -> Image.Image:
@@ -98,6 +156,8 @@ class InteractiveCrop:
             },
             "hidden": {
                 "node_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
@@ -112,7 +172,12 @@ class InteractiveCrop:
         force_original_ratio: bool,
         resize_to_original: bool,
         node_id: str,
+        prompt=None,
+        extra_pnginfo=None,
     ):
+        if _is_node_bypassed(node_id, extra_pnginfo=extra_pnginfo, prompt=prompt):
+            return (image, False)
+
         prompt_id = getattr(PromptServer.instance, "last_prompt_id", None)
         prompt_id = str(prompt_id) if prompt_id is not None else "unknown"
         node_id = str(node_id)

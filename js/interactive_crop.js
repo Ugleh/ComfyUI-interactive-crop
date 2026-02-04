@@ -118,6 +118,22 @@ function isNodeSelected(node) {
   return false;
 }
 
+function isNodeBypassed(node) {
+  const m = Number(node?.mode);
+  if (!Number.isFinite(m)) return false;
+
+  const LG = globalThis?.LiteGraph;
+  const BYPASS = Number(LG?.NODE_MODE_BYPASS);
+  const NEVER = Number(LG?.NODE_MODE_NEVER);
+
+  // ComfyUI uses LiteGraph modes; bypass is commonly 4, never/mute is commonly 2.
+  if (Number.isFinite(BYPASS) && m === BYPASS) return true;
+  if (Number.isFinite(NEVER) && m === NEVER) return true;
+  if (m === 4 || m === 2) return true;
+
+  return false;
+}
+
 function findWidget(node, exactNameLower) {
   if (!node.widgets) return null;
   return node.widgets.find(w => String(w?.name ?? "").toLowerCase() === exactNameLower) || null;
@@ -536,7 +552,7 @@ function attachInlineHandlers(node) {
     }
 
     // Instruction text (wrapped + clipped to node bounds)
-    const msg = "Drag in the preview to select a crop area. Drag handles to resize; drag inside the box to move.";
+    const msg = "Drag in the preview to select a crop area.";
     const textPaddingTop = 10;
     const lineH = 14;
     const textMaxW = Math.max(10, w);
@@ -822,6 +838,15 @@ app.registerExtension({
 
       const node = getNodeById(node_id);
       if (!node) return;
+
+      // If the user has bypassed/muted the node, immediately return passthrough
+      // so the backend doesn't block waiting for interaction.
+      if (isNodeBypassed(node)) {
+        try {
+          await postDecision({ prompt_id, node_id, action: "passthrough" });
+        } catch {}
+        return;
+      }
 
       ensureButtons(node);
       attachInlineHandlers(node);
