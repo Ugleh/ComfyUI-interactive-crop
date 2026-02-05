@@ -114,6 +114,17 @@ def _resize_image_tensor_to_hw(img_bhwc: torch.Tensor, out_h: int, out_w: int) -
 
 routes = PromptServer.instance.routes
 
+
+def _processing_interrupted() -> bool:
+    """Check ComfyUI global interrupt flag without assuming optional APIs."""
+    fn = getattr(comfy.model_management, "processing_interrupted", None)
+    if callable(fn):
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+    return False
+
 @routes.post("/interactive_crop/submit")
 async def interactive_crop_submit(request):
     form = await request.post()
@@ -211,7 +222,7 @@ class InteractiveCrop:
             if evt.wait(timeout=0.25):
                 ok = True
                 break
-            if comfy.model_management.should_stop_processing():
+            if _processing_interrupted():
                 with _LOCK:
                     _WAITERS.pop(key, None)
                 raise comfy.model_management.InterruptProcessingException(
