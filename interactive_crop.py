@@ -2,6 +2,7 @@ import os
 import uuid
 import threading
 import json
+import time
 from typing import Dict, Tuple, Any
 
 import torch
@@ -13,7 +14,7 @@ from aiohttp import web
 from server import PromptServer
 import comfy.model_management
 
-TIMEOUT_SECONDS = 6 * 60 * 60  # 6 hours
+TIMEOUT_SECONDS = 4 * 60  # 4 minutes
 
 _LOCK = threading.Lock()
 _WAITERS: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -204,7 +205,18 @@ class InteractiveCrop:
             },
         )
 
-        ok = evt.wait(timeout=float(TIMEOUT_SECONDS))
+        deadline = time.time() + float(TIMEOUT_SECONDS)
+        ok = False
+        while time.time() < deadline:
+            if evt.wait(timeout=0.25):
+                ok = True
+                break
+            if comfy.model_management.should_stop_processing():
+                with _LOCK:
+                    _WAITERS.pop(key, None)
+                raise comfy.model_management.InterruptProcessingException(
+                    "InteractiveCrop: job cancelled while waiting for user input."
+                )
 
         with _LOCK:
             payload = _WAITERS.get(key, {}).get("data")

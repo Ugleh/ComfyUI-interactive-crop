@@ -171,6 +171,7 @@ function calcWidgetAreaY(node) {
 // Global safety release
 // -------------------------
 let ACTIVE_DRAG_NODE = null;
+const ACTIVE_SESSIONS = new Set();
 
 function forceReleaseDrag() {
   if (!ACTIVE_DRAG_NODE) return;
@@ -187,6 +188,47 @@ function forceReleaseDrag() {
 }
 
 let GLOBAL_LISTENERS_INSTALLED = false;
+let VISIBILITY_RECOVERY_INSTALLED = false;
+
+function ensureVisibilityRecovery() {
+  if (VISIBILITY_RECOVERY_INSTALLED) return;
+  VISIBILITY_RECOVERY_INSTALLED = true;
+
+  const restoreSessions = () => {
+    if (document.visibilityState && document.visibilityState !== "visible") return;
+
+    for (const node of Array.from(ACTIVE_SESSIONS)) {
+      const st = node?.__interactive_crop_state;
+      if (!st || !st.sessionActive) {
+        ACTIVE_SESSIONS.delete(node);
+        continue;
+      }
+
+      ensureButtons(node);
+      attachInlineHandlers(node);
+
+      // If the preview image was evicted while the tab was hidden, reload it.
+      if (!st.img || !st.img.complete || st.img.naturalWidth === 0 || st.img.naturalHeight === 0) {
+        if (st.imgUrl) {
+          const img = new Image();
+          img.onload = () => {
+            st.img = img;
+            st.imgW = img.width;
+            st.imgH = img.height;
+            st.ready = true;
+            node.setDirtyCanvas(true, true);
+          };
+          img.src = st.imgUrl;
+        }
+      }
+
+      node.setDirtyCanvas(true, true);
+    }
+  };
+
+  document.addEventListener("visibilitychange", restoreSessions, { capture: true });
+  window.addEventListener("focus", restoreSessions, { capture: true });
+}
 function ensureGlobalListeners() {
   if (GLOBAL_LISTENERS_INSTALLED) return;
   GLOBAL_LISTENERS_INSTALLED = true;
@@ -195,6 +237,8 @@ function ensureGlobalListeners() {
   window.addEventListener("pointerup", forceReleaseDrag, { capture: true });
   window.addEventListener("pointercancel", forceReleaseDrag, { capture: true });
   window.addEventListener("blur", forceReleaseDrag);
+
+  ensureVisibilityRecovery();
 }
 
 // -------------------------
@@ -418,6 +462,7 @@ function ensureButtons(node) {
     } catch {}
 
     st.sessionActive = false;
+    ACTIVE_SESSIONS.delete(node);
     node.setDirtyCanvas(true, true);
   });
 
@@ -431,6 +476,7 @@ function ensureButtons(node) {
     await postDecision({ prompt_id: st.prompt_id, node_id: st.node_id, action: "cancel" });
 
     st.sessionActive = false;
+    ACTIVE_SESSIONS.delete(node);
     node.setDirtyCanvas(true, true);
   });
 
@@ -885,13 +931,19 @@ app.registerExtension({
         subfolder: image.subfolder || "",
       });
 
+      const imgUrl = `/view?${qs.toString()}`;
+      st.imgUrl = imgUrl;
+
       const img = new Image();
       img.onload = () => {
         st.img = img;
         st.ready = true;
         node.setDirtyCanvas(true, true);
       };
-      img.src = `/view?${qs.toString()}`;
+      img.src = imgUrl;
+
+      ACTIVE_SESSIONS.add(node);
+      node.setDirtyCanvas(true, true);
     });
   },
 });
